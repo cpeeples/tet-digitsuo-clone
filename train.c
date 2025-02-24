@@ -27,6 +27,7 @@
 #include <math.h>
 #include <time.h>
 #include <zlib.h>
+#include <immintrin.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -48,7 +49,7 @@
 #define EPS 1e-10f
 #define PRINT_INTERVAL 50
 #define PATIENCE 3
-#define BASE_LR 0.1f
+#define BASE_LR 0.10f
 #define LR_DECAY 0.95f
 #define MOMENTUM 0.9f
 
@@ -511,12 +512,12 @@ void create_augmented_dataset(const unsigned char *train_images, const unsigned 
 
 float relu(float x)
 {
-    return (x > 0) ? x : 0;
+    return (x > 0.0f) ? x : 0;
 }
 
 float relu_derivative(float x)
 {
-    return (x > 0) ? 1.0f : 0.0f;
+    return (x > 0.0f) ? 1.0f : 0.0f; //small threshold
 }
 
 void softmax(float *input, float *output, int size)
@@ -542,18 +543,26 @@ void softmax(float *input, float *output, int size)
 void forward_pass(const Network *net, const float *batch_X, float *hidden_layer, float *output_layer)
 {
 #pragma omp parallel for collapse(2)
-    for (int i = 0; i < BATCH_SIZE; i++)
-    {
-        for (int j = 0; j < HIDDEN_SIZE; j++)
-        {
-            float sum = net->hidden_bias[j];
-            for (int k = 0; k < INPUT_SIZE; k++)
-            {
-                sum += batch_X[i * INPUT_SIZE + k] * net->hidden_weights[k * HIDDEN_SIZE + j];
-            }
-            hidden_layer[i * HIDDEN_SIZE + j] = relu(sum);
+for (int i = 0; i < BATCH_SIZE; i++) {
+    for (int j = 0; j < HIDDEN_SIZE; j++) {
+        __m256 sum = _mm256_set1_ps(net->hidden_bias[j]);
+        int k;
+        for (k = 0; k <= INPUT_SIZE - 8; k += 8) {
+            __m256 in_vec = _mm256_loadu_ps(&batch_X[i * INPUT_SIZE + k]);
+            __m256 w_vec = _mm256_loadu_ps(&net->hidden_weights[k * HIDDEN_SIZE + j]);
+            sum = _mm256_add_ps(sum, _mm256_mul_ps(in_vec, w_vec));
         }
+        float temp = 0;
+        for (; k < INPUT_SIZE; k++) {
+            temp += batch_X[i * INPUT_SIZE + k] * net->hidden_weights[k * HIDDEN_SIZE + j];
+        }
+        float buf[8];
+        _mm256_storeu_ps(buf, sum);
+        float total = buf[0] + buf[1] + buf[2] + buf[3] +
+                      buf[4] + buf[5] + buf[6] + buf[7] + temp;
+        hidden_layer[i * HIDDEN_SIZE + j] = relu(total);
     }
+}
 
 #pragma omp parallel for
     for (int i = 0; i < BATCH_SIZE; i++)
@@ -607,90 +616,74 @@ void compute_loss_accuracy(const float *output_layer, const float *batch_y_oneho
 
 void backward_pass(const Network *net, const float *batch_X, const float *hidden_layer, const float *output_layer,
                    const float *batch_y_onehot, float *hidden_error, float *output_error, float *dw_hidden,
-                   float *dw_output, float *db_hidden, float *db_output)
-{
-#pragma omp parallel sections
+                   float *dw_output, float *db_hidden, float *db_output) {
+    #pragma omp parallel sections
     {
-#pragma omp section
+        #pragma omp section
         memset(dw_hidden, 0, INPUT_SIZE * HIDDEN_SIZE * sizeof(float));
-#pragma omp section
+        #pragma omp section
         memset(dw_output, 0, HIDDEN_SIZE * OUTPUT_SIZE * sizeof(float));
-#pragma omp section
+        #pragma omp section
         memset(db_hidden, 0, HIDDEN_SIZE * sizeof(float));
-#pragma omp section
+        #pragma omp section
         memset(db_output, 0, OUTPUT_SIZE * sizeof(float));
     }
 
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < BATCH_SIZE; i++)
-    {
-        for (int j = 0; j < OUTPUT_SIZE; j++)
-        {
+    #pragma omp parallel for collapse(2)
+    for (int i = 0; i < BATCH_SIZE; i++) {
+        for (int j = 0; j < OUTPUT_SIZE; j++) {
             output_error[i * OUTPUT_SIZE + j] = output_layer[i * OUTPUT_SIZE + j] - batch_y_onehot[i * OUTPUT_SIZE + j];
         }
     }
 
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < BATCH_SIZE; i++)
-    {
-        for (int j = 0; j < HIDDEN_SIZE; j++)
-        {
+    #pragma omp parallel for collapse(2)
+    for (int i = 0; i < BATCH_SIZE; i++) {
+        for (int j = 0; j < HIDDEN_SIZE; j++) {
             float sum_err = 0.0f;
-            for (int k = 0; k < OUTPUT_SIZE; k++)
-            {
+            for (int k = 0; k < OUTPUT_SIZE; k++) {
                 sum_err += output_error[i * OUTPUT_SIZE + k] * net->output_weights[j * OUTPUT_SIZE + k];
             }
             hidden_error[i * HIDDEN_SIZE + j] = sum_err * relu_derivative(hidden_layer[i * HIDDEN_SIZE + j]);
         }
     }
 
-#pragma omp parallel
+    #pragma omp parallel
     {
-#pragma omp for collapse(2)
-        for (int j = 0; j < INPUT_SIZE; j++)
-        {
-            for (int k = 0; k < HIDDEN_SIZE; k++)
-            {
+        #pragma omp for collapse(2)
+        for (int j = 0; j < INPUT_SIZE; j++) {
+            for (int k = 0; k < HIDDEN_SIZE; k++) {
                 float grad = 0.0f;
-                for (int i = 0; i < BATCH_SIZE; i++)
-                {
+                for (int i = 0; i < BATCH_SIZE; i++) {
                     grad += batch_X[i * INPUT_SIZE + j] * hidden_error[i * HIDDEN_SIZE + k];
                 }
                 dw_hidden[j * HIDDEN_SIZE + k] = grad / BATCH_SIZE;
             }
         }
 
-#pragma omp for collapse(2)
-        for (int j = 0; j < HIDDEN_SIZE; j++)
-        {
-            for (int k = 0; k < OUTPUT_SIZE; k++)
-            {
+        #pragma omp for collapse(2)
+        for (int j = 0; j < HIDDEN_SIZE; j++) {
+            for (int k = 0; k < OUTPUT_SIZE; k++) {
                 float grad = 0.0f;
-                for (int i = 0; i < BATCH_SIZE; i++)
-                {
+                for (int i = 0; i < BATCH_SIZE; i++) {
                     grad += hidden_layer[i * HIDDEN_SIZE + j] * output_error[i * OUTPUT_SIZE + k];
                 }
                 dw_output[j * OUTPUT_SIZE + k] = grad / BATCH_SIZE;
             }
         }
 
-#pragma omp for
-        for (int j = 0; j < HIDDEN_SIZE; j++)
-        {
+        #pragma omp for
+        for (int j = 0; j < HIDDEN_SIZE; j++) {
             float grad = 0.0f;
-            for (int i = 0; i < BATCH_SIZE; i++)
-            {
+            for (int i = 0; i < BATCH_SIZE; i++) {
                 grad += hidden_error[i * HIDDEN_SIZE + j];
             }
             db_hidden[j] = grad / BATCH_SIZE;
         }
 
-#pragma omp for
-        for (int j = 0; j < OUTPUT_SIZE; j++)
-        {
+        #pragma omp for
+        for (int j = 0; j < OUTPUT_SIZE; j++) {
             float grad = 0.0f;
-            for (int i = 0; i < BATCH_SIZE; i++)
-            {
+            for (int i = 0; i < BATCH_SIZE; i++) {
                 grad += output_error[i * OUTPUT_SIZE + j];
             }
             db_output[j] = grad / BATCH_SIZE;
