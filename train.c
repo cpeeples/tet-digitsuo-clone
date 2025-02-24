@@ -28,7 +28,8 @@
 #include <time.h>
 #include <zlib.h>
 #include <immintrin.h>
-
+#include "network.h" //train-cuda shared defs
+extern void forward_pass_cuda(const Network *net, const float *batch_X, float *hidden_layer, float *output_layer);
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -61,17 +62,17 @@
 #define SAMPLES_PER_DIGIT 1500
 #define TOTAL_SAMPLES (SAMPLES_PER_DIGIT * OUTPUT_SIZE * 2)
 
-typedef struct
-{
-    float *hidden_weights;
-    float *hidden_bias;
-    float *output_weights;
-    float *output_bias;
-    float *hidden_weights_momentum;
-    float *hidden_bias_momentum;
-    float *output_weights_momentum;
-    float *output_bias_momentum;
-} Network;
+//typedef struct
+//{
+//    float *hidden_weights;
+//    float *hidden_bias;
+//    float *output_weights;
+//   float *output_bias;
+//    float *hidden_weights_momentum;
+//    float *hidden_bias_momentum;
+//    float *output_weights_momentum;
+//    float *output_bias_momentum;
+//} Network;
 
 typedef struct
 {
@@ -188,7 +189,7 @@ void train_network(Network *net, unsigned char *aug_images, unsigned char *aug_l
         {
             int start_idx = batch * BATCH_SIZE;
             prepare_batch(aug_images, aug_labels, start_idx, res->batch_X, res->batch_y_onehot);
-            forward_pass(net, res->batch_X, res->hidden_layer, res->output_layer);
+            forward_pass_cuda(net, res->batch_X, res->hidden_layer, res->output_layer);
             float batch_loss, batch_acc;
             compute_loss_accuracy(res->output_layer, res->batch_y_onehot, aug_labels, start_idx, &batch_loss,
                                   &batch_acc);
@@ -512,12 +513,12 @@ void create_augmented_dataset(const unsigned char *train_images, const unsigned 
 
 float relu(float x)
 {
-    return (x > 0.0f) ? x : 0;
+    return (x > 0) ? x : 0;
 }
 
 float relu_derivative(float x)
 {
-    return (x > 0.0f) ? 1.0f : 0.0f; //small threshold
+    return (x > 0) ? 1.0f : 0.0f; //small threshold
 }
 
 void softmax(float *input, float *output, int size)
@@ -550,7 +551,7 @@ for (int i = 0; i < BATCH_SIZE; i++) {
         for (k = 0; k <= INPUT_SIZE - 8; k += 8) {
             __m256 in_vec = _mm256_loadu_ps(&batch_X[i * INPUT_SIZE + k]);
             __m256 w_vec = _mm256_loadu_ps(&net->hidden_weights[k * HIDDEN_SIZE + j]);
-            sum = _mm256_add_ps(sum, _mm256_mul_ps(in_vec, w_vec));
+           sum = _mm256_add_ps(sum, _mm256_mul_ps(in_vec, w_vec));
         }
         float temp = 0;
         for (; k < INPUT_SIZE; k++) {
